@@ -1,0 +1,45 @@
+---
+- name: Setup Databases for Microservices
+  hosts: role_database[0]
+  become: true
+  vars_files:
+    - ../group_vars/all.yml
+    - ../group_vars/vault.yml
+  tasks:
+    - name: Create CustomerOrder database
+      mysql_db:
+        login_user: root
+        login_password: "{{ mysql_root_password }}"
+        name: CustomerOrder_DB
+        state: present
+
+    - name: Create PackageTracking database
+      mysql_db:
+        login_user: root
+        login_password: "{{ mysql_root_password }}"
+        name: PackageTracking_db
+        state: present
+
+- name: Verify databases on all nodes
+  hosts: role_database
+  become: true
+  vars_files:
+    - ../group_vars/all.yml
+    - ../group_vars/vault.yml
+  tasks:
+    - name: Get database list
+      community.mysql.mysql_query:
+        login_user: root
+        login_password: "{{ mysql_root_password }}"
+        login_unix_socket: /var/run/mysqld/mysqld.sock
+        query: SHOW DATABASES
+      register: db_list
+
+    - name: Display databases on each node
+      debug:
+        msg: |
+          Node: {{ inventory_hostname }}
+          Databases:
+          {% for db in db_list.query_result[0] %}
+          - {{ db.Database }}
+          {% endfor %}

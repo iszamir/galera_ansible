@@ -1,0 +1,316 @@
+---
+- name: Setup MariaDB Galera Cluster
+  hosts: all
+  become: true
+  vars_files:
+    - ../group_vars/all.yml
+  vars:
+    mariadb_repo_url: "https://dlm.mariadb.com/repo/mariadb-server/{{ mariadb_version }}/repo/ubuntu"
+
+  tasks:
+    # 1. Initial Setup and Security
+    - name: Enable AppArmor service
+      systemd:
+        name: apparmor
+        state: started
+        enabled: true
+      ignore_errors: true
+
+    - name: Enable AppArmor for MySQL
+      shell: |
+        aa-enforce /etc/apparmor.d/usr.sbin.mysqld
+        rm -f /etc/apparmor.d/disable/usr.sbin.mysqld
+        systemctl reload apparmor
+      ignore_errors: true
+
+    # 2. Package Installation
+    - name: Install prerequisites
+      apt:
+        name:
+          - software-properties-common
+          - curl
+          - gnupg2
+          - apparmor-utils
+          - ufw
+        state: present
+        update_cache: yes
+
+    - name: Allow MariaDB ports
+      ufw:
+        rule: allow
+        port: "{{ item }}"
+        proto: tcp
+      with_items:
+        - 3306
+        - 4567
+        - 4568
+        - 4444
+
+    - name: Add MariaDB Repository Key
+      apt_key:
+        url: https://mariadb.org/mariadb_release_signing_key.asc
+        state: present
+
+    - name: Add MariaDB Repository
+      apt_repository:
+        repo: "deb [arch=amd64] https://dlm.mariadb.com/repo/mariadb-server/{{ mariadb_version }}/repo/ubuntu {{ ansible_distribution_release }} main"
+        state: present
+        filename: mariadb
+        update_cache: yes
+
+    - name: Install MariaDB packages
+      apt:
+        name:
+          - mariadb-server
+          - mariadb-client
+          - mariadb-backup
+          - galera-4
+          - rsync
+          - python3-pymysql
+        state: present
+        update_cache: yes
+
+    # 3. Configuration Setup
+    - name: Ensure /etc/mysql/debian-start exists and is executable
+      copy:
+        dest: /etc/mysql/debian-start
+        content: |
+          #!/bin/sh
+          exit 0
+        mode: '0755'
+        owner: root
+        group: root
+
+    - name: Ensure Galera config directory exists
+      file:
+        path: /etc/mysql/conf.d
+        state: directory
+        mode: '0755'
+        owner: mysql
+        group: mysql
+
+    - name: Ensure bind-address is set correctly in all config files
+      lineinfile:
+        path: "{{ item }}"
+        regexp: '^bind-address\s*='
+        line: 'bind-address = 0.0.0.0'
+        state: present
+      with_items:
+        - /etc/mysql/mariadb.conf.d/50-server.cnf
+        - /etc/mysql/my.cnf
+      ignore_errors: true
+
+    - name: Update Galera config for first node
+      template:
+        src: ../templates/galera.cnf.j2
+        dest: /etc/mysql/conf.d/galera.cnf
+        mode: '0644'
+        owner: mysql
+        group: mysql
+      vars:
+        wsrep_cluster_address: "gcomm://"
+      when: inventory_hostname == groups['all'][0]
+
+    - name: Update Galera config for other nodes
+      template:
+        src: ../templates/galera.cnf.j2
+        dest: /etc/mysql/conf.d/galera.cnf
+        mode: '0644'
+        owner: mysql
+        group: mysql
+      when: inventory_hostname != groups['all'][0]
+
+    - name: Verify Galera config was deployed
+      stat:
+        path: /etc/mysql/conf.d/galera.cnf
+      register: config_check
+      failed_when: not config_check.stat.exists
+
+    - name: Display Galera config content
+      command: cat /etc/mysql/conf.d/galera.cnf
+      register: config_content
+      changed_when: false
+
+    - name: Show Galera config
+      debug:
+        var: config_content.stdout_lines
+
+    - name: Create systemd override directory
+      file:
+        path: /etc/systemd/system/mariadb.service.d
+        state: directory
+        mode: '0755'
+
+    - name: Configure systemd service
+      copy:
+        dest: /etc/systemd/system/mariadb.service.d/override.conf
+        content: |
+          [Service]
+          ExecStartPost=
+          ExecStartPost=
+        mode: '0644'
+        owner: root
+        group: root
+
+    - name: Reload systemd
+      systemd:
+        daemon_reload: yes
+
+    - name: Configure MariaDB logging
+      blockinfile:
+        path: /etc/mysql/mariadb.conf.d/50-server.cnf
+        block: |
+          [mysqld]
+          log_error = /var/log/mysql/error.log
+        marker: "# {mark} ANSIBLE MANAGED BLOCK - MARIADB LOGGING"
+        create: yes
+      ignore_errors: true
+
+    - name: Ensure MySQL log directory exists with correct permissions
+      file:
+        path: /var/log/mysql
+        state: directory
+        owner: mysql
+        group: mysql
+        mode: '0755'
+        recurse: yes
+
+    - name: Create and set permissions for error log file
+      file:
+        path: /var/log/mysql/error.log
+        state: touch
+        owner: mysql
+        group: mysql
+        mode: '0640'
+      ignore_errors: true
+
+    - name: Remove bind-address from all config files except galera.cnf
+      lineinfile:
+        path: "{{ item }}"
+        regexp: '^bind-address'
+        state: absent
+      with_items:
+        - /etc/mysql/mariadb.cnf
+        - /etc/mysql/my.cnf
+        - /etc/mysql/mariadb.conf.d/50-server.cnf
+        - /etc/mysql/mariadb.conf.d/60-galera.cnf
+
+    - name: Ensure bind-address is set correctly in galera.cnf
+      lineinfile:
+        path: /etc/mysql/conf.d/galera.cnf
+        regexp: '^bind-address'
+        line: 'bind-address=0.0.0.0'
+        insertafter: '[mysqld]'
+
+    # 4. Service Management
+    - name: Stop MariaDB if running
+      systemd:
+        name: mariadb
+        state: stopped
+      ignore_errors: true
+
+    - name: Kill any running mariadbd processes
+      shell: pkill -9 mariadbd || true
+      ignore_errors: true
+
+    - name: Remove leftover lock and pid files
+      file:
+        path: "{{ item }}"
+        state: absent
+      with_items:
+        - /var/lib/mysql/aria_log_control
+        - /var/lib/mysql/ibdata1.lock
+        - /var/lib/mysql/*.pid
+        - /var/run/mysqld/mysqld.sock
+      ignore_errors: true
+
+    - name: Wipe datadir on joiner nodes
+      when: inventory_hostname != groups['all'][0]
+      file:
+        path: /var/lib/mysql/
+        state: absent
+
+    - name: Ensure MySQL datadir exists
+      file:
+        path: /var/lib/mysql
+        state: directory
+        owner: mysql
+        group: mysql
+        mode: '0750'
+        recurse: yes
+
+    - name: Initialize MySQL system tables on first node
+      when: inventory_hostname == groups['all'][0]
+      shell: |
+        mariadb-install-db --user=mysql --datadir=/var/lib/mysql
+        touch /var/lib/mysql/.initialized
+      args:
+        creates: /var/lib/mysql/.initialized
+
+    - name: Force safe bootstrap on first node
+      when: inventory_hostname == groups['all'][0]
+      copy:
+        dest: /var/lib/mysql/grastate.dat
+        content: |
+          # GALERA saved state
+          version: 2.1
+          uuid: 00000000-0000-0000-0000-000000000000
+          seqno: -1
+          safe_to_bootstrap: 1
+        owner: mysql
+        group: mysql
+        mode: '0644'
+
+    # 5. Cluster Bootstrap and Verification
+    - name: Bootstrap first node
+      when: inventory_hostname == groups['all'][0]
+      shell: galera_new_cluster
+      args:
+        executable: /bin/bash
+
+    - name: Wait for first node to be ready
+      when: inventory_hostname == groups['all'][0]
+      wait_for:
+        host: "{{ hostvars[inventory_hostname]['private_ip'] }}"
+        port: 3306
+        timeout: 60
+        state: started
+        search_regex: "MariaDB"
+        delay: 10
+      register: wait_result
+
+    - name: Verify MariaDB listening status
+      shell: netstat -tulpn | grep 3306 || true
+      register: netstat_out
+      when: inventory_hostname == groups['all'][0]
+
+    - name: Show listening status
+      debug:
+        var: netstat_out.stdout_lines
+      when: inventory_hostname == groups['all'][0]
+
+    - name: Start MariaDB on joiner nodes
+      when: inventory_hostname != groups['all'][0]
+      systemd:
+        name: mariadb
+        state: started
+
+    - name: Wait for joiner nodes to be ready
+      when: inventory_hostname != groups['all'][0]
+      wait_for:
+        host: "{{ hostvars[inventory_hostname]['private_ip'] }}"
+        port: 3306
+        timeout: 60
+        state: started
+      ignore_errors: true
+
+    - name: Check for conflicting bind-address settings
+      shell: grep -r "bind-address" /etc/mysql/
+      register: bind_address_check
+      ignore_errors: true
+
+    - name: Display bind-address settings
+      debug:
+        var: bind_address_check.stdout_lines
+
+    # End of playbook

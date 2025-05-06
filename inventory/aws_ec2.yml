@@ -1,0 +1,18 @@
+plugin: aws_ec2
+regions:
+  - ap-southeast-2  # Change this to your preferred region
+filters:
+  tag:Environment: galera
+  instance-state-name: running
+
+keyed_groups:
+  - key: tags.Role
+    prefix: role
+  - key: tags.Environment
+    prefix: env
+  - key: tags.Cluster
+    prefix: cluster
+
+compose:
+  ansible_host: public_ip_address
+  private_ip: private_ip_address

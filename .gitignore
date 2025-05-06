@@ -1,0 +1,9 @@
+*.retry
+.vault_pass
+group_vars/vault.yml
+*.pyc
+__pycache__/
+.vscode/
+.idea/
+*.pem
+credentials/

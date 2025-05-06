@@ -1,0 +1,35 @@
+[mysqld]
+bind-address=0.0.0.0
+default_storage_engine=InnoDB
+binlog_format=ROW
+innodb_autoinc_lock_mode=2
+log_error = /var/log/mysql/error.log
+
+# Galera Provider Configuration
+wsrep_on=ON
+wsrep_provider=/usr/lib/galera/libgalera_smm.so
+wsrep_provider_options="gcache.size=128M; gcs.fc_limit=128"
+
+# Galera Cluster Configuration
+wsrep_cluster_name="{{ cluster_name }}"
+{% if inventory_hostname == groups['all'][0] %}
+wsrep_cluster_address="gcomm://"
+{% else %}
+wsrep_cluster_address="gcomm://{{ hostvars[groups['all'][0]]['private_ip'] }}"
+{% endif %}
+
+# Galera Node Configuration
+wsrep_node_address="{{ private_ip }}"
+wsrep_node_name="{{ inventory_hostname }}"
+
+# SST Configuration
+wsrep_sst_method=rsync
+
+# InnoDB Configuration
+innodb_buffer_pool_size=256M
+innodb_log_file_size=48M
+innodb_flush_log_at_trx_commit=2
+innodb_file_per_table=1
+
+# Connection Configuration
+max_connections=1000 

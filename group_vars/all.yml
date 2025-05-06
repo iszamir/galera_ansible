@@ -1,0 +1,12 @@
+---
+# AWS Configuration
+aws_region: ap-southeast-2
+instance_type: t2.micro
+key_name: terusmaju-key-ap-southeast-2.pem
+
+# MariaDB Configuration
+mysql_root_password: "{{ vault_mysql_root_password }}"  # Change this to your preferred secure password
+mariadb_version: "10.11"
+
+# Cluster Configuration
+cluster_name: galera_cluster 

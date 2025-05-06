@@ -1,0 +1,110 @@
+---
+- name: Create AWS Infrastructure for Galera Cluster
+  hosts: localhost
+  gather_facts: false
+  vars:
+    instance_type: t2.micro
+    ami_id: ami-0c7217cdde317cfec  # Ubuntu 22.04 LTS in us-east-1
+    region: us-east-1
+    vpc_cidr: 10.0.0.0/16
+    subnet_cidr: 10.0.1.0/24
+    key_name: aws_key  # Make sure this key exists in AWS
+    instance_count: 3
+    security_group_name: galera_sg
+
+  tasks:
+    - name: Create VPC
+      amazon.aws.ec2_vpc_net:
+        name: galera_vpc
+        cidr_block: "{{ vpc_cidr }}"
+        region: "{{ region }}"
+        state: present
+      register: vpc
+
+    - name: Create Internet Gateway
+      amazon.aws.ec2_vpc_igw:
+        vpc_id: "{{ vpc.vpc.id }}"
+        region: "{{ region }}"
+        state: present
+      register: igw
+
+    - name: Create subnet
+      amazon.aws.ec2_vpc_subnet:
+        state: present
+        vpc_id: "{{ vpc.vpc.id }}"
+        cidr: "{{ subnet_cidr }}"
+        region: "{{ region }}"
+        map_public: yes
+        tags:
+          Name: galera_subnet
+      register: subnet
+
+    - name: Create security group
+      amazon.aws.ec2_security_group:
+        name: "{{ security_group_name }}"
+        description: Security group for Galera Cluster
+        vpc_id: "{{ vpc.vpc.id }}"
+        region: "{{ region }}"
+        rules:
+          - proto: tcp
+            ports: [22]
+            cidr_ip: 0.0.0.0/0
+            rule_desc: Allow SSH
+          - proto: tcp
+            ports: [3306]
+            cidr_ip: "{{ vpc_cidr }}"
+            rule_desc: MySQL
+          - proto: tcp
+            ports: [4567]
+            cidr_ip: "{{ vpc_cidr }}"
+            rule_desc: Galera Cluster
+          - proto: tcp
+            ports: [4568]
+            cidr_ip: "{{ vpc_cidr }}"
+            rule_desc: Galera IST
+          - proto: tcp
+            ports: [4444]
+            cidr_ip: "{{ vpc_cidr }}"
+            rule_desc: SST
+      register: security_group
+
+    - name: Create route table
+      amazon.aws.ec2_vpc_route_table:
+        vpc_id: "{{ vpc.vpc.id }}"
+        region: "{{ region }}"
+        tags:
+          Name: galera_route_table
+        subnets:
+          - "{{ subnet.subnet.id }}"
+        routes:
+          - dest: 0.0.0.0/0
+            gateway_id: "{{ igw.gateway_id }}"
+      register: route_table
+
+    - name: Launch EC2 instances
+      amazon.aws.ec2_instance:
+        name: "galera-node-{{ item }}"
+        instance_type: "{{ instance_type }}"
+        image_id: "{{ ami_id }}"
+        region: "{{ region }}"
+        key_name: "{{ key_name }}"
+        vpc_subnet_id: "{{ subnet.subnet.id }}"
+        security_group: "{{ security_group_name }}"
+        network:
+          assign_public_ip: true
+        tags:
+          Environment: galera
+          Role: database
+          Cluster: galera-cluster
+        wait: yes
+        count: 1
+      loop: "{{ range(1, instance_count + 1)|list }}"
+      register: ec2_instances
+
+    - name: Wait for SSH to come up
+      wait_for:
+        host: "{{ item.public_ip_address }}"
+        port: 22
+        delay: 10
+        timeout: 320
+      loop: "{{ ec2_instances.results | map(attribute='instances') | flatten }}" 

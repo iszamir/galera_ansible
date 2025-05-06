@@ -1,0 +1,66 @@
+---
+- name: Uninstall MariaDB and MySQL completely
+  hosts: all
+  become: true
+  tasks:
+    - name: Stop MariaDB service if running
+      systemd:
+        name: mariadb
+        state: stopped
+      ignore_errors: true
+
+    - name: Stop MySQL service if running
+      systemd:
+        name: mysql
+        state: stopped
+      ignore_errors: true
+
+    - name: Purge MariaDB and MySQL packages
+      apt:
+        name:
+          - mariadb-server
+          - mariadb-client
+          - mariadb-* 
+          - mysql-server
+          - mysql-client
+          - mysql-*
+        state: absent
+        purge: yes
+        autoremove: yes
+        autoclean: yes
+      ignore_errors: true
+
+    - name: Remove MariaDB and MySQL data and config directories
+      file:
+        path: "{{ item }}"
+        state: absent
+      with_items:
+        - /etc/mysql/
+        - /var/lib/mysql/
+        - /usr/share/mysql/
+        - /var/log/mysql/
+        - /var/log/mysql.*
+        - /lib/systemd/system/mysql.service
+        - /lib/systemd/system/mariadb.service
+      ignore_errors: true
+
+    - name: Remove MariaDB sources from sources.list.d
+      ansible.builtin.command: rm -f /etc/apt/sources.list.d/*mariadb*.list
+      ignore_errors: true
+
+    - name: Remove MariaDB sources from main sources.list
+      ansible.builtin.lineinfile:
+        path: /etc/apt/sources.list
+        regexp: 'mariadb'
+        state: absent
+      ignore_errors: true
+
+    - name: Fix broken packages if needed
+      ansible.builtin.command: apt --fix-broken install -y
+      ignore_errors: true
+
+    - name: Autoremove and autoclean
+      apt:
+        autoremove: yes
+        autoclean: yes
+      ignore_errors: true

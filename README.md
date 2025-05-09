@@ -55,11 +55,18 @@ ansible-playbook playbooks/setup_root_password.yml
 ansible-playbook playbooks/uninstall_mariadb.yml
 ```
 
-### 4. Create microservice databases
+### 4. Security Hardening
 
 ```bash
-ansible-playbook playbooks/setup_databases.yml
+ansible-playbook playbooks/secure_mariadb.yml --ask-vault-pass
 ```
+
+### 5. Create microservice databases
+
+```bash
+ansible-playbook playbooks/setup_databases.yml --ask-vault-pass
+```
+
 
 ## Configuration
 
@@ -76,7 +83,6 @@ The `templates/galera.cnf.j2` contains the MariaDB Galera cluster configuration.
 Edit `group_vars/all.yml` to configure:
 
 - MariaDB version
-- Root password
 - Cluster name
 - Other MySQL/Galera settings
 
@@ -102,9 +108,44 @@ Edit `group_vars/all.yml` to configure:
 - Cleans up data directories
 - Removes configuration files
 
+### check_galera_cluster.yml
+
+- Monitoring the cluster's health
+- verifying node synchronisation
+- Checking cluster connectivity
+- Ensuring all nodes are operational
+
+### secure_mariadb.yml
+
+Some of the security / hardening implemented: 
+
+#### a. Password Policies
+- Minimum length: 12 characters 
+- Basic character requirements configured
+- Password validation plugin enabled
+
+#### b. User Access Control
+- Anonymous users removed 
+- Test database dropped 
+- Root password stored securely
+
+#### c. Configuration Security
+- Root password stored in Ansible vault
+- Credentials managed through vault encryption
+- Basic MariaDB configuration hardening
+- Basic file permissions (mode: '0644') for config files
+
+#### d. Database Isolation
+- CustomerOrder and PackageTracking databases separated
+
+#### e. Monitoring & Auditing
+- Performance logging enabled
+- Error logging configured
+- Access logging enabled
+
 ## Security Notes
 
-1. Root password is stored in `group_vars/all.yml`
+1. Root password is stored in `group_vars/vault.yml`
 2. Firewall rules are configured for ports:
    - 3306 (MySQL)
    - 4567 (Galera)
@@ -124,3 +165,49 @@ Edit `group_vars/all.yml` to configure:
    ```bash
    mysql -u root -p -e "SHOW STATUS LIKE 'wsrep%';"
    ```
+
+3. If galera error persist, reinstall mariaDB: 
+```bash
+ansible-playbook playbooks/uninstall_mariadb.yml
+```
+
+## Galera Cluster Auto-Restart Configuration
+
+### Overview
+Implements automatic restart of Galera nodes after system reboot with proper cluster synchronization:
+
+- **First Node (Bootstrap Node)**
+  - Uses `galera_new_cluster` for initialization
+  - 5-second restart delay
+  - Ensures cluster bootstrap before other nodes join
+
+- **Secondary Nodes**
+  - 30-second restart delay
+  - Waits for bootstrap node
+  - Maintains cluster synchronization
+
+### Implementation Details
+
+The configuration uses systemd override files:
+- Located in `/etc/systemd/system/mariadb.service.d/galera.conf`
+- Different settings for bootstrap vs secondary nodes
+- Ensures proper startup order
+- Handles network dependencies
+
+### Verification
+
+```bash
+# Check configuration on all nodes
+ansible role_database -m shell -a "sudo cat /etc/systemd/system/mariadb.service.d/galera.conf" --ask-vault-pass
+
+# Check if service is enabled on all nodes
+ansible role_database -m shell -a "sudo systemctl is-enabled mariadb" --ask-vault-pass
+
+# Check service status on all nodes
+ansible role_database -m shell -a "sudo systemctl status mariadb" --ask-vault-pass
+```
+
+### Notes
+- First node must be fully operational before other nodes join
+- Network availability is verified before startup
+- Automatic restart on failure with configurable delays

@@ -1,0 +1,229 @@
+---
+- name: MariaDB Security Hardening
+  hosts: role_database
+  become: true
+  vars_files:
+    - ../group_vars/all.yml
+    - ../group_vars/vault.yml
+  tasks:
+    # 1. Add MariaDB Repository Key
+    - name: Add MariaDB Repository Key
+      apt_key:
+        url: https://mariadb.org/mariadb_release_signing_key.asc
+        state: present
+      tags: 
+        - passwords
+        - basic
+
+    # 2. Add MariaDB Repository
+    - name: Add MariaDB Repository
+      apt_repository:
+        repo: "deb [arch=amd64] https://mirrors.aliyun.com/mariadb/repo/10.11/ubuntu jammy main"
+        state: present
+        update_cache: yes
+      tags:
+        - passwords
+        - basic
+
+    # 3. Install Password Validation Components
+    - name: Install Password Validation Packages
+      apt:
+        name: 
+          - mariadb-server
+          - mariadb-plugin-cracklib-password-check
+          - cracklib-runtime
+        state: present
+        update_cache: yes
+      tags:
+        - passwords
+        - basic
+
+    # 4. Configure Plugin Loading
+    - name: Copy plugin configuration
+      copy:
+        dest: /etc/mysql/mariadb.conf.d/50-password-policy.cnf
+        content: |
+          [mariadb]
+          plugin_load_add = simple_password_check
+        mode: '0644'
+      notify: Restart MariaDB Cluster
+
+    # 5. Install and Configure Password Plugin
+    - name: Check if plugin is installed
+      community.mysql.mysql_query:
+        login_user: root
+        login_password: "{{ mysql_root_password }}"
+        login_unix_socket: /var/run/mysqld/mysqld.sock
+        query: "SELECT PLUGIN_NAME FROM information_schema.plugins WHERE PLUGIN_NAME = 'simple_password_check'"
+      register: plugin_check
+      ignore_errors: true
+
+    - name: Install password validation plugin
+      community.mysql.mysql_query:
+        login_user: root
+        login_password: "{{ mysql_root_password }}"
+        login_unix_socket: /var/run/mysqld/mysqld.sock
+        query: "INSTALL SONAME 'simple_password_check'"
+      when: plugin_check.query_result | length == 0
+
+    # 6. Configure Password Policies
+    - name: Set password policy parameters
+      community.mysql.mysql_query:
+        login_user: root
+        login_password: "{{ mysql_root_password }}"
+        login_unix_socket: /var/run/mysqld/mysqld.sock
+        query: "{{ item }}"
+      with_items:
+        - "SET GLOBAL simple_password_check_minimal_length = 12"
+        - "SET GLOBAL simple_password_check_digits = 1"
+        - "SET GLOBAL simple_password_check_letters_same_case = 1"
+        - "SET GLOBAL simple_password_check_other_characters = 1"
+      tags: 
+        - passwords
+        - basic
+
+    # 7. Verify Policy Settings
+    - name: Get password policy settings
+      community.mysql.mysql_query:
+        login_user: root
+        login_password: "{{ mysql_root_password }}"
+        login_unix_socket: /var/run/mysqld/mysqld.sock
+        query: >
+          SELECT variable_value 
+          FROM information_schema.global_variables 
+          WHERE variable_name = 'simple_password_check_minimal_length';
+      register: password_policy
+
+    # 8. Debug query result structure
+    - name: Debug query result structure
+      debug:
+        var: password_policy.query_result
+
+    # 9. Debug policy value
+    - name: Debug policy value
+      debug:
+        var: password_policy.query_result[0][0].variable_value
+
+    # 10. Assert password policy minimal length is set to >= 12
+    - name: Assert password policy minimal length is set to >= 12
+      assert:
+        that:
+          - password_policy.query_result[0][0].variable_value | int >= 12
+        fail_msg: "Password policy minimal length ({{ password_policy.query_result[0][0].variable_value }}) must be >= 12"
+
+    # 11. Remove Unsafe Defaults
+    - name: Remove Anonymous Users and Test DB
+      community.mysql.mysql_query:
+        login_user: root
+        login_password: "{{ mysql_root_password }}"
+        login_unix_socket: /var/run/mysqld/mysqld.sock
+        query:
+          - DELETE FROM mysql.user WHERE User='';
+          - DROP DATABASE IF EXISTS test;
+          - FLUSH PRIVILEGES;
+      tags:
+        - users
+        - basic
+
+    # 12. Configure MariaDB Logging
+    - name: Configure MariaDB Logging
+      copy:
+        dest: /etc/mysql/mariadb.conf.d/50-server.cnf
+        content: |
+          [mysqld]
+          general_log = 1
+          general_log_file = /var/log/mysql/mysql.log
+          log_error = /var/log/mysql/error.log
+          slow_query_log = 1
+          slow_query_log_file = /var/log/mysql/mysql-slow.log
+          long_query_time = 2
+        mode: '0644'
+      notify: Restart MariaDB Cluster
+
+    # Auto restart configuration for Galera nodes
+    - name: Configure auto-restart for Galera nodes
+      block:
+        - name: Create systemd override directory
+          file:
+            path: /etc/systemd/system/mariadb.service.d
+            state: directory
+            mode: '0755'
+
+        - name: Configure first node auto-restart
+          copy:
+            dest: /etc/systemd/system/mariadb.service.d/galera.conf
+            content: |
+              [Unit]
+              After=network-online.target
+              Requires=network-online.target
+              
+              [Service]
+              ExecStart=
+              ExecStart=/usr/bin/galera_new_cluster
+              Restart=on-failure
+              RestartSec=5
+            mode: '0644'
+          when: inventory_hostname == groups['role_database'][0]
+          notify: Reload systemd
+
+        - name: Configure other nodes auto-restart
+          copy:
+            dest: /etc/systemd/system/mariadb.service.d/galera.conf
+            content: |
+              [Unit]
+              After=network-online.target
+              Requires=network-online.target
+              
+              [Service]
+              Restart=on-failure
+              RestartSec=30
+              StartLimitInterval=0
+            mode: '0644'
+          when: inventory_hostname != groups['role_database'][0]
+          notify: Reload systemd
+      tags:
+        - service
+        - startup
+
+  handlers:
+    - name: Restart MariaDB Cluster
+      block:
+        - name: Stop MariaDB on all nodes
+          systemd:
+            name: mariadb
+            state: stopped
+          
+        - name: Bootstrap first node
+          command: galera_new_cluster
+          when: inventory_hostname == groups['role_database'][0]
+          register: bootstrap_result
+          until: bootstrap_result.rc == 0
+          retries: 3
+          delay: 10
+
+        - name: Wait for first node to be ready
+          wait_for:
+            timeout: 30
+          when: inventory_hostname != groups['role_database'][0]
+
+        - name: Start remaining nodes
+          systemd:
+            name: mariadb
+            state: started
+          when: inventory_hostname != groups['role_database'][0]
+
+        - name: Verify cluster status
+          community.mysql.mysql_query:
+            login_user: root
+            login_password: "{{ mysql_root_password }}"
+            login_unix_socket: /var/run/mysqld/mysqld.sock
+            query: "SHOW STATUS LIKE 'wsrep_cluster_size'"
+          register: cluster_status
+          until: cluster_status.query_result[0][1] | int == groups['role_database'] | length
+          retries: 6
+          delay: 10
+
+    # Reload systemd to apply changes
+    - name: Reload systemd
+      systemd:
+        daemon_reload: yes

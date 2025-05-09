@@ -17,7 +17,7 @@
       mysql_db:
         login_user: root
         login_password: "{{ mysql_root_password }}"
-        name: PackageTracking_db
+        name: PackageTracking_DB
         state: present
 
 - name: Verify databases on all nodes
@@ -43,3 +43,17 @@
           {% for db in db_list.query_result[0] %}
           - {{ db.Database }}
           {% endfor %}
+
+    - name: Verify cluster size
+      assert:
+        that:
+          - groups['role_database'] | length == 3
+        fail_msg: "Cluster must have exactly 3 nodes"
+      run_once: true
+
+    - name: Verify required databases exist
+      assert:
+        that:
+          - "'CustomerOrder_DB' in db_list.query_result[0] | map(attribute='Database') | list"
+          - "'PackageTracking_db' in db_list.query_result[0] | map(attribute='Database') | list"
+        fail_msg: "Required databases not found on node {{ inventory_hostname }}"
